@@ -1,158 +1,255 @@
 import os
 import math
 import random
-from flask import Flask, render_template_string, request, jsonify, session, redirect
+from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
 import folium
-from folium.plugins import HeatMap
+from folium.plugins import HeatMap, Fullscreen
 
 app = Flask(__name__)
-# Render'da oturum yönetimi için gizli anahtar şarttır
-app.secret_key = os.environ.get("SECRET_KEY", "daks_ozel_anahtar_99")
+app.secret_key = os.environ.get("SECRET_KEY", "daks_ultra_final_2026")
 
-# --- SİSTEM VERİLERİ ---
+# --- ADMIN & SİSTEM VERİLERİ ---
 ADMIN_UID = "Loxy010"
 ADMIN_PW = "157168"
-pending_apps = []
+pending_registrations = [] # Bellekte tutulan kayıtlar
 
-# --- MATEMATİKSEL MOTOR ---
-def get_distance(lat1, lon1, lat2, lon2):
+# --- BİLİMSEL MOTOR ---
+def parse_coords(coord_str):
+    try:
+        parts = coord_str.replace(" ", "").split(",")
+        return float(parts[0]), float(parts[1])
+    except:
+        return None, None
+
+def calculate_advanced_risk(b_lat, b_lon, e_lat, e_lon, mag, depth):
+    # Haversine Mesafe Hesabı
     R = 6371
-    dlat, dlon = math.radians(lat2-lat1), math.radians(lon2-lon1)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    dlat, dlon = math.radians(e_lat-b_lat), math.radians(e_lon-b_lon)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(b_lat)) * math.cos(math.radians(e_lat)) * math.sin(dlon/2)**2
+    dist = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    
+    # Sismik Azalım (Attenuation) + Bina Faktörü Simülasyonu
+    intensity = (mag * 15) / (math.log(max(dist, 0.5) + 2) * 2.8 + depth * 0.1)
+    risk_score = min(round(intensity * 7.5, 2), 100.0)
+    return risk_score
 
-def calculate_risk(b_lat, b_lon, e_lat, e_lon, mag, depth):
-    dist = get_distance(b_lat, b_lon, e_lat, e_lon)
-    intensity = (mag * 12) / (math.log(max(dist, 0.1) + 2) * 2.5 + depth * 0.15)
-    return min(round(intensity * 8, 1), 100)
-
-# --- ARAYÜZ TASARIMI ---
-UI_TEMPLATE = """
+# --- UI TASARIM (GLASSMORPHISM & DARK TECH) ---
+HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DAKS | Akıllı Karar Sistemi</title>
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <title>DAKS | Deprem Sonrası Akıllı Karar Sistemi</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/all.min.css">
     <style>
-        body { background: #0f172a; color: white; font-family: sans-serif; }
-        .hero { padding: 60px 20px; text-align: center; background: linear-gradient(rgba(15,23,42,0.8), #0f172a), url('https://images.unsplash.com/photo-1518112166137-85899e0703ba?q=80&w=1000'); background-size: cover; border-bottom: 2px solid #3b82f6; }
-        .btn-daks { border-radius: 50px; padding: 12px 30px; font-weight: bold; text-decoration: none; display: inline-block; transition: 0.3s; }
-        .btn-main { background: #3b82f6; color: white; border: none; }
-        .btn-auth { border: 2px solid #ef4444; color: white; margin-left: 10px; }
-        .module-card { background: #1e293b; border-radius: 20px; padding: 25px; border: 1px solid #334155; }
-        .form-control { background: #0f172a; border: 1px solid #334155; color: white; margin-bottom: 15px; }
-        #map-frame { width: 100%; height: 500px; border-radius: 15px; border: 2px solid #ef4444; background: #000; }
+        :root { --neon-blue: #00d2ff; --neon-red: #ff0055; --bg: #050a14; }
+        body { background: var(--bg); color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; }
+        .hero-section { height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; background: radial-gradient(circle at center, #102040 0%, #050a14 100%); }
+        .neon-text { text-shadow: 0 0 10px var(--neon-blue); color: var(--neon-blue); font-weight: 800; letter-spacing: 2px; }
+        .btn-action { padding: 15px 40px; border-radius: 50px; font-weight: bold; transition: 0.5s; text-transform: uppercase; border: 2px solid var(--neon-blue); color: white; text-decoration: none; background: transparent; }
+        .btn-action:hover { background: var(--neon-blue); box-shadow: 0 0 20px var(--neon-blue); color: black; }
+        .btn-danger-neon { border-color: var(--neon-red); }
+        .btn-danger-neon:hover { background: var(--neon-red); box-shadow: 0 0 20px var(--neon-red); }
+        input.form-control { background: rgba(0,0,0,0.5); border: 1px solid #334155; color: white; padding: 12px; border-radius: 10px; }
+        input.form-control:focus { background: rgba(0,0,0,0.8); border-color: var(--neon-blue); box-shadow: none; color: white; }
+        #map-container { height: 600px; width: 100%; border-radius: 20px; overflow: hidden; border: 2px solid var(--neon-red); box-shadow: 0 0 30px rgba(255,0,85,0.3); }
     </style>
 </head>
 <body>
-    {% if page == 'home' %}
-    <div class="hero">
-        <h1>DEPREM SONRASI AKILLI KARAR SİSTEMİ (DAKS) HOŞGELDİNİZ</h1>
-        <p class="lead">Yapay zeka destekli sismik risk analiz ve harekat platformuna hoş geldiniz.</p>
-        <div class="mt-4">
-            <a href="/citizen" class="btn-daks btn-main">Bina Riskini Hesapla</a>
-            <a href="/login" class="btn-daks btn-auth">Yetkili Sistemi</a>
-        </div>
+
+{% if page == 'home' %}
+<div class="hero-section px-3">
+    <div class="mb-4"><i class="fas fa-shield-virus fa-5x neon-text"></i></div>
+    <h1 class="display-3 neon-text">D A K S</h1>
+    <h2 class="h4 mb-4">DEPREM SONRASI AKILLI KARAR SİSTEMİ</h2>
+    <p class="lead mb-5" style="max-width: 700px; color: #aaa;">
+        Afet yönetiminde yapay zeka devrimi. Bina bazlı risk analizinden, 
+        yetkili operasyonel ısı haritalarına kadar tam teşekküllü karar destek platformu.
+    </p>
+    <div class="d-flex gap-3 flex-wrap justify-content-center">
+        <a href="/citizen" class="btn-action">Vatandaş Modülü</a>
+        <a href="/login" class="btn-action btn-danger-neon">Yetkili Girişi</a>
     </div>
-    {% elif page == 'citizen' %}
-    <div class="container py-5">
-        <a href="/" style="color: #3b82f6;">← Geri Dön</a>
-        <div class="module-card mt-3">
-            <h3>🏠 Bina Analiz Modülü</h3>
-            <form method="POST" action="/calc">
-                <div class="row">
-                    <div class="col-md-6"><label>Bina Enlem</label><input type="number" step="0.00001" name="blat" class="form-control" required></div>
-                    <div class="col-md-6"><label>Bina Boylam</label><input type="number" step="0.00001" name="blon" class="form-control" required></div>
-                    <div class="col-md-6"><label>Deprem Enlem</label><input type="number" step="0.00001" name="elat" class="form-control" required></div>
-                    <div class="col-md-6"><label>Deprem Boylam</label><input type="number" step="0.00001" name="elon" class="form-control" required></div>
-                    <div class="col-md-6"><label>Büyüklük (Mw)</label><input type="number" step="0.1" name="mag" class="form-control" required></div>
-                    <div class="col-md-6"><label>Derinlik (km)</label><input type="number" name="dep" class="form-control" required></div>
+</div>
+{% endif %}
+
+{% if page == 'citizen' %}
+<div class="container py-5">
+    <a href="/" class="text-decoration-none text-secondary"><i class="fas fa-arrow-left"></i> ANA MENÜ</a>
+    <div class="glass p-5 mt-4">
+        <h2 class="neon-text mb-4 text-center">🏠 Bina Risk Analiz Portalı</h2>
+        <form method="POST" action="/calc_citizen">
+            <div class="row g-4">
+                <div class="col-md-12">
+                    <label class="mb-2">Bina Koordinatları (Enlem, Boylam)</label>
+                    <input type="text" name="b_coords" class="form-control" placeholder="Örn: 37.8895, 41.1292" required>
                 </div>
-                <button class="btn btn-primary w-100">HESAPLA</button>
-            </form>
-            {% if res %}<div class="alert alert-danger mt-3">Tahmini Yıkılma Riski: %{{ res }}</div>{% endif %}
-        </div>
-    </div>
-    {% elif page == 'dashboard' %}
-    <div class="container-fluid p-4">
-        <h3>🛡️ DAKS Harekat Paneli (Admin: {{ user }})</h3>
-        <div class="row mt-4">
-            <div class="col-md-3">
-                <div class="module-card">
-                    <label>Deprem Enlem</label><input type="number" id="mlat" class="form-control" value="38.0">
-                    <label>Deprem Boylam</label><input type="number" id="mlon" class="form-control" value="37.5">
-                    <label>Büyüklük</label><input type="number" id="mmag" class="form-control" value="7.6">
-                    <button onclick="loadMap()" class="btn btn-danger w-100">CANLI HARİTAYI GÜNCELLE</button>
+                <div class="col-md-12">
+                    <label class="mb-2">Tahmini Deprem Koordinatları (Enlem, Boylam)</label>
+                    <input type="text" name="e_coords" class="form-control" placeholder="Örn: 38.0123, 37.5432" required>
+                </div>
+                <div class="col-md-6">
+                    <label class="mb-2">Deprem Büyüklüğü (Mw)</label>
+                    <input type="number" step="0.1" name="mag" class="form-control" placeholder="Örn: 7.4" required>
+                </div>
+                <div class="col-md-6">
+                    <label class="mb-2">Derinlik (km)</label>
+                    <input type="number" name="depth" class="form-control" placeholder="Örn: 10" required>
                 </div>
             </div>
-            <div class="col-md-9">
-                <iframe id="map-frame" src="/map_init"></iframe>
+            <button type="submit" class="btn-action w-100 mt-5">ANALİZİ GERÇEKLEŞTİR</button>
+        </form>
+        {% if res %}
+        <div class="mt-5 p-4 text-center glass" style="border-left: 5px solid var(--neon-red);">
+            <h3 class="mb-0">Analiz Sonucu: <span class="text-danger fw-bold">%{{ res }}</span> Yıkılma Riski</h3>
+            <p class="text-secondary mt-2 small">Bu veri DAKS AI motoru tarafından sismik dalga azalım modelleriyle hesaplanmıştır.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% if page == 'dashboard' %}
+<div class="container-fluid p-4">
+    <div class="d-flex justify-content-between align-items-center mb-4 glass p-3">
+        <h2 class="neon-text mb-0"><i class="fas fa-satellite-dish"></i> OPERASYONEL PANEL</h2>
+        <div class="text-end">
+            <small class="text-secondary">AKTİF YETKİLİ:</small><br>
+            <span class="badge bg-danger">{{ user }}</span>
+        </div>
+    </div>
+    
+    <div class="row g-4">
+        <div class="col-lg-3">
+            <div class="glass p-4 h-100">
+                <h5>Veri Girişi</h5>
+                <hr class="border-secondary">
+                <div class="mb-3">
+                    <label class="small text-secondary">Koordinatlar</label>
+                    <input type="text" id="m_coords" class="form-control" value="38.0, 37.5">
+                </div>
+                <div class="mb-3">
+                    <label class="small text-secondary">Büyüklük</label>
+                    <input type="number" id="m_mag" class="form-control" value="7.6">
+                </div>
+                <button onclick="updateLiveMap()" class="btn-action btn-danger-neon w-100">HARİTAYI ÇİZ</button>
+            </div>
+        </div>
+        <div class="col-lg-9">
+            <div id="map-container">
+                <iframe id="map-frame" src="/map_init" style="width:100%; height:100%; border:none;"></iframe>
             </div>
         </div>
     </div>
-    <script>
-        function loadMap() {
-            const url = `/map_gen?lat=${$('#mlat').val()}&lon=${$('#mlon').val()}&mag=${$('#mmag').val()}`;
-            $('#map-frame').attr('src', url);
-        }
-    </script>
-    {% endif %}
+</div>
+<script>
+    function updateLiveMap() {
+        const coords = document.getElementById('m_coords').value;
+        const mag = document.getElementById('m_mag').value;
+        document.getElementById('map-frame').src = `/map_gen?coords=${coords}&mag=${mag}`;
+    }
+</script>
+{% endif %}
+
 </body>
 </html>
 """
 
 # --- ROTALAR ---
 @app.route("/")
-def home(): return render_template_string(UI_TEMPLATE, page='home')
+def home(): return render_template_string(HTML_TEMPLATE, page='home')
 
 @app.route("/citizen")
-def citizen(): return render_template_string(UI_TEMPLATE, page='citizen')
+def citizen(): return render_template_string(HTML_TEMPLATE, page='citizen')
 
-@app.route("/calc", methods=["POST"])
-def calc():
-    r = calculate_risk(float(request.form['blat']), float(request.form['blon']), float(request.form['elat']), 
-                       float(request.form['elon']), float(request.form['mag']), float(request.form['dep']))
-    return render_template_string(UI_TEMPLATE, page='citizen', res=r)
+@app.route("/calc_citizen", methods=["POST"])
+def calc_citizen():
+    b_lat, b_lon = parse_coords(request.form.get('b_coords'))
+    e_lat, e_lon = parse_coords(request.form.get('e_coords'))
+    mag = float(request.form.get('mag', 0))
+    depth = float(request.form.get('depth', 0))
+    
+    if None in [b_lat, b_lon, e_lat, e_lon]:
+        return "Koordinat formatı hatalı! Lütfen '37.8, 41.1' şeklinde girin."
+    
+    res = calculate_advanced_risk(b_lat, b_lon, e_lat, e_lon, mag, depth)
+    return render_template_string(HTML_TEMPLATE, page='citizen', res=res)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
         if request.form.get("uid") == ADMIN_UID and request.form.get("pw") == ADMIN_PW:
-            session['u'] = ADMIN_UID
-            return redirect("/dashboard")
+            session['user'] = ADMIN_UID
+            return redirect(url_for('dashboard'))
     return render_template_string("""
-    <body style="background:#0f172a; color:white; text-align:center; padding-top:100px; font-family:sans-serif;">
-        <form method="POST" style="display:inline-block; background:#1e293b; padding:40px; border-radius:20px;">
-            <h2>YETKİLİ GİRİŞİ</h2>
-            <input name="uid" placeholder="ID" style="display:block; margin:10px auto; padding:10px;"><br>
-            <input name="pw" type="password" placeholder="Şifre" style="display:block; margin:10px auto; padding:10px;"><br>
-            <button style="background:#ef4444; color:white; border:none; padding:10px 20px;">GİRİŞ</button>
+    <body style="background:#050a14; color:white; display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;">
+        <form method="POST" style="background:rgba(255,255,255,0.05); padding:50px; border-radius:30px; border:1px solid #334155; text-align:center;">
+            <h2 style="color:#00d2ff; margin-bottom:30px;">YETKİLİ SİSTEMİ</h2>
+            <input name="uid" placeholder="Yetkili ID" style="background:black; color:white; border:1px solid #334155; padding:12px; width:100%; margin-bottom:15px; border-radius:10px;">
+            <input name="pw" type="password" placeholder="Şifre" style="background:black; color:white; border:1px solid #334155; padding:12px; width:100%; margin-bottom:20px; border-radius:10px;">
+            <button style="background:#00d2ff; color:black; border:none; padding:15px 40px; border-radius:50px; font-weight:bold; cursor:pointer; width:100%;">GİRİŞ YAP</button>
+            <p style="margin-top:20px; font-size:12px; color:#666;">Onaylı yetkililer dışında erişim yasaktır.</p>
+            <a href="/register_request" style="color:#00d2ff; text-decoration:none; font-size:13px;">Kayıt Başvurusu Yap</a>
         </form>
+    </body>
+    """)
+
+@app.route("/register_request", methods=["GET", "POST"])
+def register_request():
+    if request.method == "POST":
+        data = request.form.to_dict()
+        pending_registrations.append(data)
+        return "<body style='background:#050a14; color:white; text-align:center; padding-top:100px;'><h2>BAŞVURU Loxy010'A İLETİLDİ.</h2><p>Admin onayı sonrası Gmail üzerinden bilgilendirileceksiniz.</p><a href='/'>Ana Sayfa</a></body>"
+    return render_template_string("""
+    <body style="background:#050a14; color:white; font-family:sans-serif; padding:50px;">
+        <div style="max-width:500px; margin:0 auto; background:rgba(255,255,255,0.05); padding:40px; border-radius:20px;">
+            <h2 style="color:#ff0055;">YETKİLİ KAYIT FORMU</h2>
+            <form method="POST">
+                <input name="ad" placeholder="Ad Soyad" style="width:100%; padding:12px; margin-bottom:15px; background:black; color:white; border:1px solid #334155;">
+                <input name="mail" placeholder="Gmail" style="width:100%; padding:12px; margin-bottom:15px; background:black; color:white; border:1px solid #334155;">
+                <input name="is" placeholder="Meslek / Birim" style="width:100%; padding:12px; margin-bottom:15px; background:black; color:white; border:1px solid #334155;">
+                <textarea name="neden" placeholder="Kullanım Amacı" style="width:100%; padding:12px; margin-bottom:15px; background:black; color:white; border:1px solid #334155;"></textarea>
+                <button style="background:#ff0055; color:white; border:none; padding:15px; width:100%; font-weight:bold;">BAŞVURUYU GÖNDER</button>
+            </form>
+        </div>
     </body>
     """)
 
 @app.route("/dashboard")
 def dashboard():
-    if 'u' not in session: return redirect("/login")
-    return render_template_string(UI_TEMPLATE, page='dashboard', user=session['u'])
+    if 'user' not in session: return redirect('/login')
+    return render_template_string(HTML_TEMPLATE, page='dashboard', user=session['user'])
 
 @app.route("/map_init")
 def map_init():
-    return folium.Map(location=[39, 35], zoom_start=6, tiles="cartodb dark_matter")._repr_html_()
+    m = folium.Map(location=[39, 35], zoom_start=6, tiles="cartodb dark_matter")
+    Fullscreen().add_to(m) # Tam ekran butonu
+    return m._repr_html_()
 
 @app.route("/map_gen")
 def map_gen():
-    lat, lon, mag = float(request.args.get('lat')), float(request.args.get('lon')), float(request.args.get('mag'))
+    coords_str = request.args.get('coords')
+    lat, lon = parse_coords(coords_str)
+    mag = float(request.args.get('mag', 7))
+    
     m = folium.Map(location=[lat, lon], zoom_start=8, tiles="cartodb dark_matter")
-    h_data = [[lat + random.gauss(0, 0.3), lon + random.gauss(0, 0.3), random.random()] for _ in range(200)]
-    HeatMap(h_data).add_to(m)
-    folium.Marker([lat, lon], icon=folium.Icon(color='red')).add_to(m)
+    Fullscreen().add_to(m)
+    
+    # Gerçekçi ısı dağılımı
+    heat_data = []
+    for _ in range(500):
+        off_lat, off_lon = random.gauss(0, 0.45), random.gauss(0, 0.45)
+        p_lat, p_lon = lat + off_lat, lon + off_lon
+        dist = math.sqrt(off_lat**2 + off_lon**2)
+        weight = max(0, (mag / 8) - dist)
+        heat_data.append([p_lat, p_lon, weight])
+    
+    HeatMap(heat_data, radius=20, blur=15).add_to(m)
+    folium.Marker([lat, lon], popup=f"MERKEZ ÜSSÜ (Mw {mag})", icon=folium.Icon(color='red', icon='warning')).add_to(m)
     return m._repr_html_()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-                       
