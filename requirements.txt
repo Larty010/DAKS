@@ -1,7 +1,5 @@
 flask
-pandas
-numpy
-scikit-learn
-gunicorn
 folium
+requests
+gunicorn
 jinja2
