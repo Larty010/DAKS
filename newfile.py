@@ -1,247 +1,390 @@
-import os
-import math
+import flet as ft
+import sqlite3
 import random
-import requests
-from flask import Flask, render_template_string, request, jsonify, session, redirect, url_for
-import folium
-from folium.plugins import HeatMap, Fullscreen, MousePosition
+import time
+import math
+from datetime import datetime
 
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "daks_final_victory_2026")
+# =====================================================================
+# 1. VERİTABANI VE SİSTEM MOTORU (GELİŞMİŞ MİMARİ)
+# =====================================================================
+class DAKSDatabase:
+    def __init__(self):
+        self.db_name = "daks_production.db"
+        self.conn = sqlite3.connect(self.db_name, check_same_thread=False)
+        self.cur = self.conn.cursor()
+        self.init_db()
 
-# --- SİSTEM VERİLERİ ---
-ADMIN_UID = "Loxy010"
-ADMIN_PW = "157168"
-pending_registrations = [] # Kayıt başvurularının tutulduğu liste
+    def init_db(self):
+        # Kullanıcı veritabanı detaylandırıldı (Kayıt tarihi, son giriş vb. eklenebilir)
+        self.cur.execute("""CREATE TABLE IF NOT EXISTS users (
+            uid TEXT PRIMARY KEY, 
+            pw TEXT, 
+            name TEXT, 
+            contact TEXT, 
+            role TEXT,
+            created_at TEXT
+        )""")
+        
+        # KodAdı-Gelecek Kurucu / Özel Yetkili Listesi
+        admins = [
+            ("Loxy010", "157168"), 
+            ("Bdrhnq72", "157168"), 
+            ("Rubiz7256", "157168"), 
+            ("Nbhr121", "157168")
+        ]
+        
+        for u, p in admins:
+            try:
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                self.cur.execute("INSERT INTO users (uid, pw, name, role, created_at) VALUES (?,?,?,?,?)", 
+                                 (u, p, f"Yetkili_{u}", "ADMIN", now))
+            except sqlite3.IntegrityError:
+                pass # Kayıt zaten varsa atla
+        self.conn.commit()
 
-# --- YARDIMCI FONKSİYONLAR ---
-def parse_coords(coord_str):
-    try:
-        parts = coord_str.replace(" ", "").split(",")
-        return float(parts[0]), float(parts[1])
-    except:
-        return None, None
+# =====================================================================
+# 2. ANA UYGULAMA DÖNGÜSÜ
+# =====================================================================
+def main(page: ft.Page):
+    # Sayfa ve Tema Ayarları
+    page.title = "DAKS | Deprem Akıllı Karar Sistemi"
+    page.theme_mode = ft.ThemeMode.DARK
+    page.bgcolor = "#051406" # Kurumsal Koyu Yeşil
+    page.window_width = 450
+    page.window_height = 850
+    page.padding = 0
+    page.fonts = {"RobotoSlab": "https://github.com/google/fonts/raw/main/apache/robotoslab/RobotoSlab%5Bwght%5D.ttf"}
+    page.theme = ft.Theme(font_family="RobotoSlab")
 
-def get_live_earthquakes():
-    try:
-        response = requests.get("https://api.orhanaydogdu.com.tr/deprem/kandilli/live")
-        return response.json()['result'][:10]
-    except:
-        return []
+    # Global Oturum (Session) Yönetimi
+    engine = DAKSDatabase()
+    session = {"uid": None, "role": "GUEST", "name": ""}
 
-def calculate_risk(b_lat, b_lon, e_lat, e_lon, mag, depth):
-    R = 6371
-    dlat, dlon = math.radians(e_lat-b_lat), math.radians(e_lon-b_lon)
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(b_lat)) * math.cos(math.radians(e_lat)) * math.sin(dlon/2)**2
-    dist = R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    intensity = (mag * 15) / (math.log(max(dist, 0.5) + 2) * 2.8 + depth * 0.1)
-    return min(round(intensity * 7.5, 2), 100.0)
+    # Ortak UI Araçları
+    def show_alert(message, color="green"):
+        page.snack_bar = ft.SnackBar(
+            content=ft.Text(message, color="white", weight="bold"), 
+            bgcolor=color,
+            elevation=10,
+            duration=3000
+        )
+        page.snack_bar.open = True
+        page.update()
 
-# --- TASARIM (GLOBAL STİLLER) ---
-CSS = """
-<style>
-    :root { --neon-blue: #38bdf8; --neon-red: #f43f5e; --bg: #020617; --card: #0f172a; }
-    body { background: var(--bg); color: #f1f5f9; font-family: 'Inter', sans-serif; margin: 0; }
-    .glass { background: var(--card); border: 1px solid #1e293b; border-radius: 15px; padding: 25px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-    .neon-btn { border: 2px solid var(--neon-blue); color: white; padding: 12px 30px; border-radius: 50px; text-decoration: none; font-weight: bold; transition: 0.4s; display: inline-block; background: transparent; }
-    .neon-btn:hover { background: var(--neon-blue); color: black; box-shadow: 0 0 20px var(--neon-blue); }
-    .neon-btn-red { border-color: var(--neon-red); }
-    .neon-btn-red:hover { background: var(--neon-red); box-shadow: 0 0 20px var(--neon-red); }
-    .input-custom { background: #020617; border: 1px solid #334155; color: white; padding: 12px; border-radius: 8px; width: 100%; margin-bottom: 15px; }
-</style>
-"""
+    # =====================================================================
+    # 3. YAN MENÜ (NAVIGATION DRAWER) DETAYLANDIRMASI
+    # =====================================================================
+    def build_drawer():
+        return ft.NavigationDrawer(
+            bgcolor="#0a290c",
+            elevation=20,
+            controls=[
+                ft.Container(height=30),
+                ft.Icon(ft.icons.MULTILINE_CHART, size=50, color="#C6FF00"),
+                ft.Text("DAKS SİSTEM MENÜSÜ", weight="bold", size=18, text_align="center", color="#C6FF00", letter_spacing=2),
+                ft.Divider(color="white24", thickness=2),
+                ft.NavigationDrawerDestination(
+                    icon=ft.icons.INFO_OUTLINE, 
+                    selected_icon=ft.icons.INFO, 
+                    label="Hakkımızda"
+                ),
+                ft.NavigationDrawerDestination(
+                    icon=ft.icons.SHIELD_OUTLINED, 
+                    selected_icon=ft.icons.SHIELD, 
+                    label="Şifre ve Güvenlik"
+                ),
+                ft.Container(expand=True), # Esnek boşluk
+                
+                # Kurum ve Ekip Bilgisi (En Alt Kısım)
+                ft.Container(
+                    content=ft.Column([
+                        ft.Divider(color="white10"),
+                        ft.Text("Türk Telekom Anadolu Lisesi", size=14, weight="bold", color="white"),
+                        ft.Icon(ft.icons.SATELLITE_ALT, size=45, color="#1B5E20"), # Telekom Temsili
+                        ft.Text("KodAdı-Gelecek Grubu Yapımı", size=12, italic=True, color="#888888")
+                    ], horizontal_alignment="center", spacing=5),
+                    padding=20, 
+                    alignment=ft.alignment.bottom_center
+                )
+            ],
+            on_change=lambda e: handle_menu_click(e)
+        )
 
-# --- SAYFA ŞABLONLARI ---
-LAYOUT = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>DAKS | Deprem Karar Sistemi</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/all.min.css">
-    """ + CSS + """
-</head>
-<body>
-    {{ content | safe }}
-</body>
-</html>
-"""
+    page.drawer = build_drawer()
 
-# --- ROTALAR ---
-@app.route("/")
-def home():
-    content = """
-    <div class="container text-center" style="padding-top: 15vh;">
-        <i class="fas fa-shield-alt fa-5x mb-4" style="color: var(--neon-blue);"></i>
-        <h1 class="display-3 fw-bold mb-3" style="letter-spacing: 5px;">D A K S</h1>
-        <p class="lead text-secondary mb-5">Deprem Sonrası Akıllı Karar ve Analiz Platformu</p>
-        <div class="d-flex justify-content-center gap-4">
-            <a href="/citizen" class="neon-btn">VATANDAŞ MODÜLÜ</a>
-            <a href="/login" class="neon-btn neon-btn-red">YETKİLİ GİRİŞİ</a>
-        </div>
-    </div>
-    """
-    return render_template_string(LAYOUT, content=content)
+    def handle_menu_click(e):
+        idx = e.control.selected_index
+        if idx == 0:
+            page.go("/about")
+        elif idx == 1:
+            if session["uid"]:
+                page.go("/security")
+            else:
+                show_alert("Güvenlik ayarlarına erişmek için giriş yapmalısınız.", "red")
+        page.drawer.open = False
+        page.update()
 
-@app.route("/citizen", methods=["GET", "POST"])
-def citizen():
-    res = None
-    if request.method == "POST":
-        b_lat, b_lon = parse_coords(request.form.get("b_coords"))
-        e_lat, e_lon = parse_coords(request.form.get("e_coords"))
-        mag = float(request.form.get("mag", 0))
-        res = calculate_risk(b_lat, b_lon, e_lat, e_lon, mag, 10)
-    
-    content = f"""
-    <div class="container py-5">
-        <a href="/" class="text-secondary text-decoration-none mb-4 d-inline-block"><i class="fas fa-arrow-left"></i> Geri Dön</a>
-        <div class="row justify-content-center">
-            <div class="col-md-6 glass">
-                <h3 class="mb-4 text-center"><i class="fas fa-home me-2"></i>Bina Risk Analizi</h3>
-                <form method="POST">
-                    <label class="small text-secondary mb-1">Bina Koordinatları</label>
-                    <input name="b_coords" class="input-custom" placeholder="Örn: 37.88, 41.12" required>
-                    <label class="small text-secondary mb-1">Deprem Koordinatları</label>
-                    <input name="e_coords" class="input-custom" placeholder="Örn: 38.01, 37.54" required>
-                    <label class="small text-secondary mb-1">Tahmini Büyüklük (Mw)</label>
-                    <input name="mag" type="number" step="0.1" class="input-custom" placeholder="Örn: 7.4" required>
-                    <button class="neon-btn w-100 mt-3">ANALİZ ET</button>
-                </form>
-                {"<div class='alert alert-danger mt-4 text-center'><h4>Risk Skoru: %" + str(res) + "</h4></div>" if res else ""}
-            </div>
-        </div>
-    </div>
-    """
-    return render_template_string(LAYOUT, content=content)
+    # =====================================================================
+    # 4. SAYFA OLUŞTURUCU FONKSİYONLAR (MODÜLER YAPI)
+    # =====================================================================
 
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        if request.form.get("uid") == ADMIN_UID and request.form.get("pw") == ADMIN_PW:
-            session['user'] = ADMIN_UID
-            return redirect("/dashboard")
-    
-    content = """
-    <div class="container py-5 text-center">
-        <div class="row justify-content-center">
-            <div class="col-md-4 glass">
-                <h3 class="mb-4 text-danger">YETKİLİ GİRİŞİ</h3>
-                <form method="POST">
-                    <input name="uid" class="input-custom" placeholder="Kullanıcı ID">
-                    <input name="pw" type="password" class="input-custom" placeholder="Şifre">
-                    <button class="neon-btn neon-btn-red w-100 mb-3">GİRİŞ YAP</button>
-                </form>
-                <p class="small text-secondary">Sistem yetkiniz yok mu?</p>
-                <a href="/register" class="text-info text-decoration-none">Şimdi Kayıt Başvurusu Yap</a>
-            </div>
-        </div>
-    </div>
-    """
-    return render_template_string(LAYOUT, content=content)
+    def build_splash_and_login():
+        uid_inp = ft.TextField(label="Kullanıcı ID (Örn: Loxy010)", border_color="#C6FF00", prefix_icon=ft.icons.PERSON)
+        pw_inp = ft.TextField(label="Sistem Şifresi", password=True, can_reveal_password=True, border_color="#C6FF00", prefix_icon=ft.icons.LOCK)
+        remember_cb = ft.Checkbox(label="Beni Hatırla (Oturumu Açık Tut)", fill_color="#1B5E20")
+        loading_ring = ft.ProgressRing(visible=False, color="#C6FF00")
 
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "POST":
-        pending_registrations.append(request.form.to_dict())
-        return "<body style='background:#020617;color:white;text-align:center;padding-top:100px;'><h2>BAŞVURUNUZ ALINDI.</h2><p>Loxy010 incelemesi sonrası Gmail ile dönüş yapılacaktır.</p><a href='/'>Ana Sayfa</a></body>"
-    
-    content = """
-    <div class="container py-5">
-        <div class="row justify-content-center">
-            <div class="col-md-6 glass">
-                <h3 class="mb-4 text-info">YETKİLİ KAYIT FORMU</h3>
-                <form method="POST">
-                    <input name="ad" class="input-custom" placeholder="Ad Soyad" required>
-                    <input name="mail" class="input-custom" placeholder="Gmail Adresiniz" required>
-                    <input name="is" class="input-custom" placeholder="Kurum / Görev" required>
-                    <textarea name="neden" class="input-custom" placeholder="Erişim Nedeniniz?" rows="3"></textarea>
-                    <button class="neon-btn w-100">BAŞVURUYU GÖNDER</button>
-                </form>
-            </div>
-        </div>
-    </div>
-    """
-    return render_template_string(LAYOUT, content=content)
+        def attempt_login(e):
+            if not uid_inp.value or not pw_inp.value:
+                show_alert("Lütfen ID ve Şifre alanlarını boş bırakmayınız.", "red")
+                return
+            
+            # Yükleme Animasyonu Simülasyonu
+            loading_ring.visible = True
+            btn_login.disabled = True
+            page.update()
+            time.sleep(0.5) # Ağa bağlanıyormuş hissi
+            
+            engine.cur.execute("SELECT role, name FROM users WHERE uid=? AND pw=?", (uid_inp.value, pw_inp.value))
+            user = engine.cur.fetchone()
+            
+            loading_ring.visible = False
+            btn_login.disabled = False
+            
+            if user:
+                session["uid"], session["role"], session["name"] = uid_inp.value, user[0], user[1]
+                show_alert(f"Sisteme Hoşgeldiniz, {session['name']}!", "green")
+                page.go("/dashboard")
+            else:
+                show_alert("Sistem Hatası: ID veya Şifre uyumsuzluğu tespit edildi.", "red")
+            page.update()
 
-@app.route("/dashboard")
-def dashboard():
-    if 'user' not in session: return redirect("/login")
-    quakes = get_live_earthquakes()
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html lang="tr">
-    <head>
-        <meta charset="UTF-8">
-        <title>DAKS v3.0 | Harekat Merkezi</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body { background: #020617; color: white; margin: 0; overflow: hidden; }
-            .sidebar { height: 100vh; background: #0f172a; border-right: 1px solid #1e293b; overflow-y: auto; padding: 20px; }
-            .quake-card { background: rgba(255,255,255,0.05); border: 1px solid #334155; padding: 10px; margin-bottom: 10px; cursor: pointer; border-radius: 8px; }
-            .quake-card:hover { background: #1e293b; }
-        </style>
-    </head>
-    <body>
-        <div class="container-fluid">
-            <div class="row">
-                <div class="col-md-3 sidebar">
-                    <h4 style="color:#38bdf8;">DAKS HAREKAT</h4>
-                    <hr>
-                    <a href="/admin_panel" class="btn btn-outline-info btn-sm w-100 mb-4">Gelen Kayıtları Yönet</a>
-                    <h6 class="text-secondary small">CANLI DEPREMLER (Kandilli)</h6>
-                    {% for q in quakes %}
-                    <div class="quake-card" onclick="document.getElementById('m-frame').src='/map_gen?coords={{q.geojson.coordinates[1]}},{{q.geojson.coordinates[0]}}&mag={{q.mag}}'">
-                        <strong>{{ q.title.split('(')[0] }}</strong> <span class="badge bg-danger">{{ q.mag }}</span><br>
-                        <small class="text-muted">{{ q.date }}</small>
-                    </div>
-                    {% endfor %}
-                </div>
-                <div class="col-md-9 p-0">
-                    <iframe id="m-frame" src="/map_init" style="width:100%; height:100vh; border:none;"></iframe>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
-    """, quakes=quakes)
+        btn_login = ft.ElevatedButton("GÜVENLİ GİRİŞ YAP", on_click=attempt_login, width=350, height=55, bgcolor="#1B5E20", color="white", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)))
 
-@app.route("/admin_panel")
-def admin_panel():
-    if 'user' not in session: return redirect("/login")
-    return render_template_string("""
-    <body style="background:#020617; color:white; padding:40px;">
-        <h3>Gelen Yetki Başvuruları</h3>
-        <table border="1" style="width:100%; margin-top:20px; text-align:left;">
-            <tr><th>Ad</th><th>Mail</th><th>Görev</th><th>Neden</th></tr>
-            {% for r in regs %}
-            <tr><td>{{r.ad}}</td><td>{{r.mail}}</td><td>{{r.is}}</td><td>{{r.neden}}</td></tr>
-            {% endfor %}
-        </table>
-        <br><a href="/dashboard">Geri Dön</a>
-    </body>
-    """, regs=pending_registrations)
+        return ft.View("/", [
+            ft.Container(
+                content=ft.Column([
+                    ft.Container(height=50),
+                    ft.Icon(ft.icons.SHOW_CHART, size=100, color="#C6FF00"), # Logo Temsili
+                    ft.Text("DAKS", size=70, weight="w900", letter_spacing=8, color="white"),
+                    ft.Text("DEPREM AKILLI KARAR SİSTEMİ", size=14, color="#C6FF00", weight="bold", letter_spacing=1),
+                    ft.Container(height=40),
+                    uid_inp, 
+                    pw_inp, 
+                    remember_cb,
+                    ft.Container(height=10),
+                    loading_ring,
+                    btn_login,
+                    ft.Container(height=5),
+                    ft.OutlinedButton("YENİ HESAP OLUŞTUR (KAYIT OL)", on_click=lambda _: page.go("/register"), width=350, height=55, border_color="#C6FF00", color="#C6FF00", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10)))
+                ], horizontal_alignment="center"), 
+                padding=30
+            )
+        ], bgcolor="#051406")
 
-@app.route("/map_init")
-def map_init():
-    return folium.Map(location=[39, 35], zoom_start=6, tiles="cartodb dark_matter")._repr_html_()
 
-@app.route("/map_gen")
-def map_gen():
-    coords = request.args.get('coords')
-    lat, lon = map(float, coords.split(','))
-    mag = float(request.args.get('mag', 4))
-    m = folium.Map(location=[lat, lon], zoom_start=11)
-    folium.TileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', name='Uydu', attr='Google').add_to(m)
-    folium.TileLayer('cartodb dark_matter', name='Gece').add_to(m)
-    folium.LayerControl().add_to(m)
-    Fullscreen().add_to(m)
-    
-    heat_data = [[lat + random.gauss(0, 0.05), lon + random.gauss(0, 0.05), 0.7] for _ in range(200)]
-    HeatMap(heat_data).add_to(m)
-    folium.Marker([lat, lon], icon=folium.Icon(color='red', icon='info-sign')).add_to(m)
-    return m._repr_html_()
+    def build_register():
+        name_inp = ft.TextField(label="Nüfus Adı ve Soyadı", prefix_icon=ft.icons.BADGE)
+        contact_inp = ft.TextField(label="E-posta Adresi veya Telefon (+90)", prefix_icon=ft.icons.CONTACT_MAIL)
+        code_inp = ft.TextField(label="6 Haneli Doğrulama Kodu", visible=False, text_align="center", max_length=6)
+        progress = ft.ProgressBar(visible=False, color="#C6FF00")
+        
+        def send_verification(e):
+            if len(name_inp.value) < 3 or len(contact_inp.value) < 5:
+                show_alert("Lütfen geçerli iletişim bilgileri giriniz.", "red")
+                return
+            progress.visible = True
+            btn_send.disabled = True
+            page.update()
+            time.sleep(1.2) # SMS Gönderim Simülasyonu
+            progress.visible = False
+            code_inp.visible = True
+            btn_verify.visible = True
+            show_alert("Sistem Mesajı: Doğrulama kodu gönderildi (Test Kodu: 123456)", "green")
+            page.update()
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+        def complete_registration(e):
+            if code_inp.value == "123456":
+                # Benzersiz ID ve Şifre Üretimi
+                new_uid = "USR" + str(random.randint(10000, 99999))
+                new_pw = str(random.randint(100000, 999999))
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                engine.cur.execute("INSERT INTO users (uid, pw, name, contact, role, created_at) VALUES (?,?,?,?,?,?)", 
+                                   (new_uid, new_pw, name_inp.value, contact_inp.value, "USER", now))
+                engine.conn.commit()
+                
+                dlg = ft.AlertDialog(
+                    title=ft.Text("KİMLİK OLUŞTURULDU", color="#C6FF00"), 
+                    content=ft.Text(f"Sayın {name_inp.value},\n\nSisteme giriş yapabilmeniz için kimlik bilgileriniz aşağıdadır:\n\nSİSTEM ID: {new_uid}\nGEÇİCİ ŞİFRE: {new_pw}\n\nLütfen bu bilgileri güvenli bir yere not ediniz.")
+                )
+                page.dialog = dlg
+                dlg.open = True
+                page.go("/")
+            else:
+                show_alert("Güvenlik İhlali: Hatalı doğrulama kodu girildi.", "red")
+
+        btn_send = ft.ElevatedButton("KİMLİK DOĞRULAMA KODU GÖNDER", on_click=send_verification, bgcolor="#1B5E20", color="white", width=400, height=50)
+        btn_verify = ft.ElevatedButton("DOĞRULA VE SİSTEME KAYIT OL", on_click=complete_registration, visible=False, bgcolor="#C6FF00", color="black", width=400, height=50)
+
+        return ft.View("/register", [
+            ft.AppBar(title=ft.Text("Vatandaş Kayıt Sistemi"), bgcolor="#1B5E20"),
+            ft.Container(content=ft.Column([
+                ft.Text("Kişisel Bilgiler", weight="bold", color="#C6FF00"),
+                ft.Text("Lütfen bilgilerinizi eksiksiz ve doğru giriniz. Afet anında bu veriler hayati önem taşır.", size=12, color="white70"),
+                ft.Container(height=10),
+                name_inp, 
+                contact_inp, 
+                progress,
+                ft.Container(height=20),
+                btn_send, 
+                code_inp, 
+                btn_verify
+            ]), padding=25)
+        ], bgcolor="#051406")
+
+
+    def build_about():
+        # Tam istenilen metin bloğu
+        about_text = (
+            "Yazılım ve fizik alanlarında çalışmalar yürüten, gerçek dünya problemlerine "
+            "çözüm üretmeyi hedefleyen bir araştırma ve geliştirme ekibiyiz. Amacımız; "
+            "ülkemizde ve çevremizde karşılaştığımız sorunları bilimsel yöntemlerle analiz ederek "
+            "uygulanabilir ve yenilikçi teknolojik çözümler geliştirmektir.\n\n"
+            "Çalışmalarımızda teorik bilgi ile pratik uygulamayı birlikte ilerleterek, "
+            "toplumsal fayda sağlayan projeler üretmeye odaklanıyoruz. Her projede gözlem, "
+            "analiz, tasarım ve geliştirme süreçlerini sistemli bir şekilde yürüterek "
+            "sürdürülebilir ve geliştirilebilir çözümler ortaya koymayı hedefliyoruz."
+        )
+        return ft.View("/about", [
+            ft.AppBar(title=ft.Text("KodAdı-Gelecek"), bgcolor="#1B5E20"),
+            ft.Container(content=ft.Column([
+                ft.Text("BİZ KODADI-GELECEK GRUBUYUZ", weight="w900", size=24, color="#C6FF00", text_align="center"),
+                ft.Divider(color="white24", thickness=2),
+                ft.Container(height=10),
+                ft.Text(about_text, size=15, text_align="justify", color="white", selectable=True),
+                ft.Container(expand=True),
+                ft.Icon(ft.icons.BIOTECH, size=60, color="#1B5E20", opacity=0.5)
+            ], horizontal_alignment="center"), padding=30, expand=True)
+        ], bgcolor="#051406")
+
+
+    def build_dashboard():
+        purpose = (
+            "DAKS (Deprem Akıllı Karar Sistemi), afet yönetimini dijital bir ekosisteme dönüştüren hibrit bir teknolojidir. "
+            "Projemizin temel amacı; depremin ilk kritik saniyelerinde insan hatasını devre dışı bırakarak can kurtarmaktır. "
+            "Sistem, kullanıcıların bina yapı verilerini ve canlı deprem büyüklüğünü harmanlayarak bir risk skoru üretir. "
+            "5.0 ve üzeri sarsıntılarda otomatik devreye giren 'Yaşıyor Musunuz?' modülü, enkaz altındaki canlarımızın "
+            "konumlarını yetkili ısı haritasına anlık işler. Bu sayede ekipler, 'cevap verilmeyen' ve 'binası yıkılan' "
+            "noktalara saniyeler içinde müdahale edebilir."
+        )
+        return ft.View("/dashboard", [
+            ft.AppBar(
+                leading=ft.IconButton(ft.icons.MENU, on_click=lambda _: setattr(page.drawer, 'open', True) or page.update()), 
+                title=ft.Text("DAKS Ana Kontrol Paneli"), 
+                bgcolor="#1B5E20"
+            ),
+            ft.Container(content=ft.Column([
+                ft.Card(
+                    content=ft.Container(
+                        content=ft.Column([
+                            ft.Row([ft.Icon(ft.icons.ACCOUNT_TREE, color="#C6FF00"), ft.Text("PROJE VİZYONU VE AMACI", weight="bold", color="#C6FF00")]),
+                            ft.Text(purpose, size=12, text_align="justify", italic=True, color="white70")
+                        ]), padding=15
+                    ), color="#0a290c"
+                ),
+                ft.Container(height=20),
+                ft.Text("SİSTEM MODÜLLERİ", weight="bold", color="white"),
+                ft.Divider(color="white24"),
+                ft.ElevatedButton(
+                    content=ft.Row([ft.Icon(ft.icons.HOME_WORK_OUTLINED), ft.Text("VATANDAŞ MODÜLÜ (Bina Risk Analizi)", size=14, weight="bold")], alignment=ft.MainAxisAlignment.CENTER),
+                    on_click=lambda _: page.go("/citizen"), width=400, height=70, bgcolor="#2E7D32", color="white", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10))
+                ),
+                ft.Container(height=10),
+                ft.ElevatedButton(
+                    content=ft.Row([ft.Icon(ft.icons.ADMIN_PANEL_SETTINGS), ft.Text("YETKİLİ HAREKAT MERKEZİ", size=14, weight="bold")], alignment=ft.MainAxisAlignment.CENTER),
+                    on_click=lambda _: page.go("/admin_map") if session["role"] == "ADMIN" else page.go("/admin_apply"), 
+                    width=400, height=70, bgcolor="#8B0000", color="white", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=10))
+                )
+            ], horizontal_alignment="center"), padding=20)
+        ], bgcolor="#051406")
+
+
+    def build_citizen():
+        # Yapısal Veri Girişleri (Geliştirildi: Kat Sayısı eklendi)
+        bina_yasi = ft.Dropdown(label="Bina Yönetmelik Yılı", options=[ft.dropdown.Option("1999 Öncesi (Eski Tip)"), ft.dropdown.Option("2000 - 2018 Arası (Geçiş)"), ft.dropdown.Option("2018 Sonrası (Modern)")], value="2000 - 2018 Arası (Geçiş)", border_color="#C6FF00", filled=True, fill_color="#0a290c")
+        zemin_tipi = ft.Dropdown(label="Jeolojik Zemin Durumu", options=[ft.dropdown.Option("Kayalık Zemin (Sağlam)"), ft.dropdown.Option("Alüvyon Zemin (Orta Risk)"), ft.dropdown.Option("Dolgu Zemin (Yüksek Risk)")], value="Alüvyon Zemin (Orta Risk)", border_color="#C6FF00", filled=True, fill_color="#0a290c")
+        kat_sayisi = ft.Dropdown(label="Bina Kat Sayısı", options=[ft.dropdown.Option("1-3 Kat (Düşük Katlı)"), ft.dropdown.Option("4-8 Kat (Orta Katlı)"), ft.dropdown.Option("9+ Kat (Yüksek Katlı)")], value="4-8 Kat (Orta Katlı)", border_color="#C6FF00", filled=True, fill_color="#0a290c")
+
+        def hesapla_risk(mag, eq_name):
+            # Bilimsel Algoritma Simülasyonu
+            k_yapi = 1.6 if "1999" in bina_yasi.value else 1.1 if "2000" in bina_yasi.value else 0.7
+            k_zemin = 0.8 if "Kayalık" in zemin_tipi.value else 1.2 if "Alüvyon" in zemin_tipi.value else 1.6
+            k_kat = 0.9 if "1-3" in kat_sayisi.value else 1.1 if "4-8" in kat_sayisi.value else 1.4
+            
+            # Formül: (Mw^2.2) * Çarpanlar
+            ham_olasilik = (math.pow(mag, 2.2)) * 0.35 * k_yapi * k_zemin * k_kat
+            risk = int(min(max(ham_olasilik, 0), 100))
+            
+            # 3.0 altı depremlerde sıfır risk (Amaca tam uyum)
+            if mag < 3.0: 
+                risk = 0
+
+            # Renk ve Durum Matrisi
+            if risk < 20:
+                renk, durum, icon = "green", "YIKILMA RİSKİ YOK (GÜVENLİ)", ft.icons.CHECK_CIRCLE
+            elif risk < 50:
+                renk, durum, icon = "yellow", "DÜŞÜK HASAR BEKLENTİSİ", ft.icons.WARNING_AMBER
+            elif risk < 80:
+                renk, durum, icon = "orange", "YÜKSEK HASAR / KISMİ GÖÇME RİSKİ", ft.icons.CARPENTER
+            else:
+                renk, durum, icon = "red", "KRİTİK! TAM GÖÇME / YIKILMA BEKLENİYOR", ft.icons.DANGEROUS
+
+            # Sonuç Ekranı Detaylandırıldı
+            dlg = ft.AlertDialog(
+                title=ft.Row([ft.Icon(icon, color=renk), ft.Text("BİNA YIKILMA OLASILIĞI", color=renk)]),
+                content=ft.Column([
+                    ft.Text(f"Referans Deprem: {eq_name} ({mag} Mw)", weight="bold", color="white"),
+                    ft.Divider(color="white24"),
+                    ft.Text(f"Yapısal Çarpanlar:\nYıl: {bina_yasi.value}\nZemin: {zemin_tipi.value}\nKat: {kat_sayisi.value}", size=12, color="white70"),
+                    ft.Container(height=15),
+                    ft.Text("HESAPLANAN RİSK ORANI:", size=12, color="white"),
+                    ft.Text(f"%{risk}", size=45, color=renk, weight="w900", text_align="center"),
+                    ft.ProgressBar(value=risk/100, color=renk, bgcolor="#333333"),
+                    ft.Text(durum, color=renk, weight="bold", text_align="center")
+                ], tight=True)
+            )
+            page.dialog = dlg
+            dlg.open = True
+            page.update()
+
+        # Kandilli Verileri Simülasyon Listesi
+        eq_list = [
+            ("Kahramanmaraş (Pazarcık)", 7.7, "06 Şubat 2023 - 04:17"),
+            ("İzmir (Seferihisar Açıkları)", 6.6, "30 Ekim 2020 - 14:51"),
+            ("Elazığ (Sivrice)", 6.8, "24 Ocak 2020 - 20:55"),
+            ("Kocaeli (Gölcük)", 7.4, "17 Ağustos 1999 - 03:02"),
+            ("Malatya (Pütürge)", 5.2, "25 Ocak 2024 - 10:22"),
+            ("Marmara Denizi (Mikro Deprem)", 2.1, "Bugün - 08:15 (Test)")
+        ]
+
+        list_controls = []
+        for loc, mag, date in eq_list:
+            list_controls.append(
+                ft.ListTile(
+                    leading=ft.Icon(ft.icons.WAVES, color="white54"),
+                    title=ft.Text(f"{loc} - {mag} Mw", weight="bold"), 
+                    subtitle=ft.Text(date, size=11, color="#888888"),
+                    trailing=ft.Icon(ft.icons.ARROW_FORWARD_IOS, size=14),
+                    on_click=lambda e, m=mag, n=loc: hesapla_risk(m, n)
+                )
+            )
+
+        return ft.View("/citizen", [
+            ft.AppBar(title=ft.Text("Bina Risk ve Olasılık Analizi"), bgcolor="#1B5E20"),
+            ft.Container(content=ft.Column([
+                # Otomatik Konum (Metin Olarak)
+                ft.Container(
+                    content=ft.Row([
+ 
