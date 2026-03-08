@@ -1,5 +1,1 @@
-flask
-folium
-requests
-gunicorn
-jinja2
+flet
